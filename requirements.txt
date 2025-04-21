@@ -1,0 +1,8 @@
+streamlit
+boto3
+langchain-aws
+langchain-core
+langchain-mcp-adapters
+uv
+mcp-server-fetch
+mcp-server-time
