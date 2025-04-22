@@ -177,25 +177,25 @@ Resources:
             - HostPort: 80
               Protocol: tcp
               ContainerPort: 80
-        - Name: aws-otel-collector
-          Image: public.ecr.aws/aws-observability/aws-otel-collector:latest
-          Cpu: 0
-          PortMappings: []
-          Essential: true
-          Environment: []
-          MountPoints: []
-          VolumesFrom: []
-          Secrets:
-            - Name: AOT_CONFIG_CONTENT
-              ValueFrom: otel-collector-config
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-group: "/ecs/ecs-aws-otel-sidecar-collector"
-              awslogs-region: !Ref "AWS::Region"
-              awslogs-stream-prefix: "aws-otel-collector"
-            SecretOptions: []
-          SystemControls: []
+        # - Name: aws-otel-collector
+        #   Image: public.ecr.aws/aws-observability/aws-otel-collector:latest
+        #   Cpu: 0
+        #   PortMappings: []
+        #   Essential: true
+        #   Environment: []
+        #   MountPoints: []
+        #   VolumesFrom: []
+        #   Secrets:
+        #     - Name: AOT_CONFIG_CONTENT
+        #       ValueFrom: otel-collector-config
+        #   LogConfiguration:
+        #     LogDriver: awslogs
+        #     Options:
+        #       awslogs-group: "/ecs/ecs-aws-otel-sidecar-collector"
+        #       awslogs-region: !Ref "AWS::Region"
+        #       awslogs-stream-prefix: "aws-otel-collector"
+        #     SecretOptions: []
+        #   SystemControls: []
       Cpu: 1024
       Memory: 2048
       ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
@@ -258,7 +258,7 @@ Resources:
       Port: 80
       TargetType: ip
       HealthCheckProtocol: HTTP
-      HealthCheckPath: "/health"
+      HealthCheckPath: "/"
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
       HealthCheckTimeoutSeconds: 20
@@ -318,6 +318,32 @@ Resources:
         HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
         DNSName: !GetAtt ALB.DNSName
 
+  # --------------------------------------------------#
+  # DynamoDB
+  # --------------------------------------------------#
+  ConversationHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${SystemName}-conversation-history"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: conversation_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiration_time
+        Enabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${SystemName}-conversation-history"
+        - Key: System
+          Value: !Ref SystemName
 
 Outputs:
   ALBOutputDNSName:
