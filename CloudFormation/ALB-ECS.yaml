@@ -1,0 +1,331 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Template for app Application ECS and ALB
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: System Configuration
+        Parameters:
+          - SystemName
+      - Label:
+          default: ACMCertificateArn
+        Parameters:
+          - ACMCertificateArn
+      - Label:
+          default: Route53 Configuration
+        Parameters:
+          - HostZoneID
+          - DomainName
+      - Label:
+          default: ELBSecurityPolicy
+        Parameters:
+          - ELBSecurityPolicy
+    ParameterLabels:
+      SystemName:
+        default: System Name
+      ACMCertificateArn:
+        default: ACMCertificateArn
+      HostZoneID:
+        default: HostZoneID
+      ELBSecurityPolicy:
+        default: ELBSecurityPolicy
+      DomainName:
+        default: DomainName
+
+# --------------------------------------------------#
+# Input Parameters
+# --------------------------------------------------#   
+Parameters:
+  SystemName:
+    Type: String
+    Description: システム名
+    
+  ACMCertificateArn:
+    Description: "Enter the Certificate ARN"
+    Type: String
+    Default: none
+  
+  HostZoneID:
+    Description: "Select the Route53 hosted zone ID"
+    Type: AWS::Route53::HostedZone::Id
+
+  ELBSecurityPolicy:
+    Type: String
+    AllowedValues:
+      - ELBSecurityPolicy-TLS-1-2-Ext-2018-06
+      - ELBSecurityPolicy-TLS13-1-2-2021-06
+
+  DomainName:
+    Description: "Enter the Route53 domain name"
+    Type: String
+    Default: none
+
+Resources:
+
+
+#--------------------------------------------------
+# - ECR Repository
+#--------------------------------------------------
+  ECR:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Join ["-", [adot, java, sample]] 
+      ImageScanningConfiguration: 
+        scanOnPush: "true"
+      ImageTagMutability: "MUTABLE"
+      Tags:
+      - Key: Name
+        Value: !Join ["-", [adot, java, sample]] 
+      - Key: System
+        Value: !Ref SystemName
+
+
+#--------------------------------------------------
+# - Role
+#--------------------------------------------------
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      Path: "/"    
+      RoleName: !Join ["-", [!Ref SystemName, ecstaskexecution, role]]   
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+
+  ECSTaskRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      Path: "/"    
+      RoleName: !Join ["-", [!Ref SystemName, ecstask, role]]
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/CloudWatchLogsFullAccess     
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess           
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+#--------------------------------------------------
+# - ECS Cluster
+#--------------------------------------------------
+  ECSCluster:
+    Type: "AWS::ECS::Cluster"
+    Properties:
+      ClusterName: !Join ["-", [ !Ref SystemName, ecscluster]]
+      ClusterSettings:
+        - Name: "containerInsights"
+          Value: "enabled"
+      Tags:
+        - Key: System
+          Value: !Ref SystemName        
+        - Key: Name
+          Value: !Join ["-", [ !Ref SystemName, ecscluster]]
+
+
+#--------------------------------------------------
+# - LogGroup
+#--------------------------------------------------
+  ECSLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: 
+        !Sub
+          - '/aws/ecs/${ecstaskname}'     
+          - ecstaskname: 
+              !Join ["-", [!Ref SystemName, container]]
+      RetentionInDays: 365
+
+#--------------------------------------------------
+# - TaskDefinition
+#--------------------------------------------------
+  TaskDefinition:
+    Type: "AWS::ECS::TaskDefinition"
+    Properties:
+      RequiresCompatibilities:
+        - "FARGATE"
+      ContainerDefinitions:
+        - Name: !Join ["-", [!Ref SystemName, container]]
+          Image: 
+              !Sub
+                - "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ecrname}:${tag}"     
+                - ecrname: !Ref ECR
+                  tag: "latest"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ECSLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: !Sub "${SystemName}-container"
+          MemoryReservation: 1024
+          PortMappings:
+            - HostPort: 80
+              Protocol: tcp
+              ContainerPort: 80
+        - Name: aws-otel-collector
+          Image: public.ecr.aws/aws-observability/aws-otel-collector:latest
+          Cpu: 0
+          PortMappings: []
+          Essential: true
+          Environment: []
+          MountPoints: []
+          VolumesFrom: []
+          Secrets:
+            - Name: AOT_CONFIG_CONTENT
+              ValueFrom: otel-collector-config
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: "/ecs/ecs-aws-otel-sidecar-collector"
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: "aws-otel-collector"
+            SecretOptions: []
+          SystemControls: []
+      Cpu: 1024
+      Memory: 2048
+      ExecutionRoleArn: !GetAtt ECSTaskExecutionRole.Arn
+      Family: !Join ["-", [!Ref SystemName, task]]
+      NetworkMode: awsvpc 
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref SystemName, taskdefinition ]]
+      TaskRoleArn: !GetAtt ECSTaskRole.Arn
+
+#--------------------------------------------------
+# - Service
+#--------------------------------------------------
+  ECSService:
+    Type: "AWS::ECS::Service"
+    DependsOn:
+      - ALBListenerHTTPS
+    Properties:
+      Cluster: !Ref ECSCluster
+      DeploymentController:
+        Type: "ECS"
+      DesiredCount: 0
+      EnableECSManagedTags: true    
+      HealthCheckGracePeriodSeconds: "240"
+      LaunchType: "FARGATE"
+      LoadBalancers:
+        - TargetGroupArn: !Ref TargetGroupResource
+          ContainerPort: "80"
+          ContainerName: !Join ["-", [!Ref SystemName, container]]
+      NetworkConfiguration: 
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - Fn::ImportValue: !Join ["-", [ !Ref SystemName, app, sg, id]] 
+          Subnets:
+            - Fn::ImportValue: !Join ["-", [!Ref SystemName, private, appsubnet, '01', id]]
+            - Fn::ImportValue: !Join ["-", [!Ref SystemName, private, appsubnet, '02', id]]
+      ServiceName: !Join ["-", [!Ref SystemName, service, ecs]]
+      TaskDefinition: !Ref TaskDefinition
+      PlatformVersion: "1.4.0"
+      SchedulingStrategy: REPLICA
+      PropagateTags: TASK_DEFINITION
+      Tags:
+        - Key: System
+          Value: !Ref SystemName        
+        - Key: Name
+          Value: !Join ["-", [!Ref SystemName, service, ecs]]
+
+  
+  # --------------------------------------------------#
+  # TargetGroup
+  # --------------------------------------------------#
+  TargetGroupResource:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: 
+        Fn::ImportValue: !Join ["-", [!Ref SystemName, vpc, id]]
+      Name: app-target-group
+      Protocol: HTTP
+      Port: 80
+      TargetType: ip
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: "/health"
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 20
+      HealthCheckIntervalSeconds: 30
+      Matcher: 
+        HttpCode: 200
+      Tags:
+        - Key: Name
+          Value: app-tg
+
+  # --------------------------------------------------#
+  # ALB
+  # --------------------------------------------------#
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: app-alb
+      # パブリックサブネットのみ配置可という意味
+      Scheme: internet-facing
+      # ALBを指定
+      Type: application
+      Subnets:
+        - Fn::ImportValue: !Join ["-", [!Ref SystemName, public, subnet, '01', id]]
+        - Fn::ImportValue: !Join ["-", [!Ref SystemName, public, subnet, '02', id]]
+      SecurityGroups:
+        - Fn::ImportValue: !Join ["-", [ !Ref SystemName, alb, sg, id]]
+      IpAddressType: ipv4
+      Tags:
+        - Key: Name
+          Value: app-alb
+  
+  # Listener
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref ACMCertificateArn
+      SslPolicy: !Ref ELBSecurityPolicy
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroupResource
+          Order: 1
+          Type: forward
+  
+  # --------------------------------------------------#
+  # Route53
+  # --------------------------------------------------#
+  ALBAliasRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostZoneID
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+        DNSName: !GetAtt ALB.DNSName
+
+
+Outputs:
+  ALBOutputDNSName:
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: alb-dnsname
+  ALBOutputHsotZone:
+    Value: !GetAtt ALB.CanonicalHostedZoneID
+    Export:
+      Name: alb-hostzoneid
+
